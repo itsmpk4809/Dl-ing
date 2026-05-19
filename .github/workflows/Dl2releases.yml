@@ -1,0 +1,93 @@
+name: File Downloader to GitHub Releases (M-NRZ)
+on:
+  workflow_dispatch:
+    inputs:
+      file_urls:
+        description: 'Paste URLs (Separated by spaces OR newlines)'
+        required: true
+        type: string
+      package_style:
+        description: 'Packaging Format'
+        required: true
+        type: choice
+        options:
+          - 'Keep Original Format'
+          - 'Combine all into a single Zip file'
+        default: 'Keep Original Format'
+
+permissions:
+  contents: write
+
+jobs:
+  download_and_release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Process Downloads and Create Release
+        env:
+          RAW_URLS: ${{ github.event.inputs.file_urls }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p downloads_folder
+          PKG_STYLE="${{ github.event.inputs.package_style }}"
+          FILE_CLOCK=$(date +'%Y-%m-%d_%H-%M-%S')
+          
+          # SANITIZATION ENGINE: Clean spaces, newlines, and carriage returns
+          echo "$RAW_URLS" | tr ' ' '\n' | tr -d '\r' | sed '/^[[:space:]]*$/d' > clean_urls.txt
+
+          # Step 1: Download files
+          while IFS= read -r URL || [ -n "$URL" ]; do
+            FILENAME=$(basename "$URL")
+            echo "📥 Downloading $FILENAME..."
+            curl -L "$URL" -o "downloads_folder/$FILENAME"
+          done < clean_urls.txt
+
+          if [ -z "$(ls -A downloads_folder)" ]; then
+            echo "❌ Error: No files were downloaded."
+            exit 1
+          fi
+
+          # Step 2: Handle packaging choice
+          if [ "$PKG_STYLE" = "Combine all into a single Zip file" ]; then
+            MASTER_ZIP="Batch_Package_${FILE_CLOCK}.zip"
+            echo "📦 Packing all downloaded items into $MASTER_ZIP..."
+            
+            mkdir -p final_output
+            cd downloads_folder
+            7z a "../final_output/$MASTER_ZIP" *
+            cd ..
+          else
+            echo "✅ Keeping files in their original format..."
+            mv downloads_folder final_output
+          fi
+
+          # Step 3: Create Tag & Release
+          TAG_NAME="v$(date +'%Y.%m.%d-%H%M%S')"
+          echo "🏷️ Generated release tag: $TAG_NAME"
+
+          gh release create "$TAG_NAME" \
+            final_output/* \
+            --title "Archive Batch ($TAG_NAME)" \
+            --notes "Automated processing run via M-NRZ Engine."
+
+          # Step 4: Print the Direct Download Links directly to the Github Summary page
+          echo "## 🚀 Direct Download Links (Raw Style)" >> $GITHUB_STEP_SUMMARY
+          echo "You can copy and use these links directly inside any downloader or app:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          cd final_output
+          for FILE in *; do
+            # URL-encode spaces in filenames if there are any
+            ENCODED_FILE=$(echo "$FILE" | sed 's/ /%20/g')
+            LINK="https://github.com/${{ github.repository }}/releases/download/$TAG_NAME/$ENCODED_FILE"
+            LATEST_LINK="https://github.com/${{ github.repository }}/releases/latest/download/$ENCODED_FILE"
+            
+            echo "🔹 **$FILE**" >> $GITHUB_STEP_SUMMARY
+            echo "   • Permanent Link: \`$LINK\`" >> $GITHUB_STEP_SUMMARY
+            echo "   • Always-Latest Link: \`$LATEST_LINK\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          done
+          cd ..
